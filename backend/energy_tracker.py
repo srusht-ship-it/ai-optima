@@ -5,7 +5,7 @@ from typing import Dict, Any
 import logging
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(_name_)
+logger = logging.getLogger(__name__)
 
 class EnhancedEnergyTracker:
     """Track energy consumption and environmental impact of AI operations"""

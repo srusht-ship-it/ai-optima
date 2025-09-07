@@ -14,7 +14,7 @@ ENERGY_SAVING_THRESHOLD = 0.30  # 30% energy savings required to switch
 ACCURACY_DROP_TOLERANCE = 0.02  # Max 2% accuracy drop allowed
 
 # Paths
-ROOT = Path(_file_).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "data" / "email_classification.db"
 MODELS_PATH = ROOT / "models"
 EMAIL_SAMPLES_PATH = ROOT / "data" / "email_samples.txt"

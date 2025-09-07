@@ -5,7 +5,7 @@ from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassifica
 from .config import LIGHT_MODEL, HEAVY_MODEL, EMAIL_CATEGORIES
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(_name_)
+logger = logging.getLogger(__name__)
 
 class EmailModel:
     def _init_(self, model_name: str, model_type: str):
