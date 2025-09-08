@@ -1,15 +1,16 @@
 from typing import Dict, List, Tuple, Any
 import numpy as np
-import time  # ← MISSING IMPORT
-import hashlib  # ← MISSING IMPORT
+import time
+import hashlib
 from .energy_tracker import EnhancedEnergyTracker
 from .email_models import ModelManager
 from .config import *
 import sqlite3
 import json
+from main import simple_classification
 
 class IntelligentEmailAgent:
-    def _init_(self):
+    def __init__(self):
         self.model_manager = ModelManager()
         self.model_manager.initialize_models()
         self.performance_history = []
@@ -160,28 +161,76 @@ class IntelligentEmailAgent:
 class AgentOrchestrator:
     """Main orchestrator class that manages the entire workflow"""
     
-    def _init_(self):
+    def __init__(self):
         self.email_agent = IntelligentEmailAgent()
         self.db_path = DB_PATH
         
     def process_email(self, email_data: Dict) -> Dict[str, Any]:
-        """Complete email processing pipeline"""
+        """Complete email processing pipeline with multiple models"""
         
-        # Extract email content
         email_text = email_data.get("text", "")
         user_preferences = email_data.get("preferences", {})
+
+        all_results = {}
+
+        for model_info in ALL_MODELS:
+            model_name = model_info["name"]
+            model_type = model_info.get("type", "custom")
+            
+            try:
+                # Run the model
+                if model_type == "fallback":
+                    result = simple_classification(email_text)
+                else:
+                    result = self.email_agent._classify_with_model(email_text, model_type=model_type)
+                
+                result["model_name"] = model_name
+                result["model_type"] = model_type
+                all_results[model_name] = result
+
+            except Exception as e:
+                all_results[model_name] = {
+                    "error": str(e),
+                    "model_name": model_name,
+                    "model_type": model_type
+                }
+
+        # Step 2: Choose final result based on confidence/energy/priority
+        final_result = self._select_best_model(all_results, user_preferences)
+
+        # Step 3: Log final result
+        self._log_classification(final_result)
+
+        # Step 4: Add AI insights
+        final_result = self._add_insights(final_result)
+
+        # Step 5: Include all model results for frontend display
+        final_result["other_model_results"] = all_results
+
+        return final_result
+
+    def _select_best_model(self, all_results: Dict[str, Any], user_preferences: Dict) -> Dict[str, Any]:
+        """Pick the best model based on confidence, priority, or energy"""
         
-        # Classify using intelligent agent
-        classification_result = self.email_agent.classify_email(email_text, user_preferences)
+        # Default: highest confidence
+        best_model = None
+        max_conf = -1
         
-        # Log to database
-        self._log_classification(classification_result)
-        
-        # Add suggestions and insights
-        enhanced_result = self._add_insights(classification_result)
-        
-        return enhanced_result
-    
+        for model_name, result in all_results.items():
+            if "confidence" in result and result["confidence"] > max_conf:
+                max_conf = result["confidence"]
+                best_model = result
+
+        # Check user priority (optional)
+        if user_preferences.get("priority") == "energy":
+            # Pick model with lowest CO2
+            best_model = min(
+                [r for r in all_results.values() if "energy_metrics" in r],
+                key=lambda x: x["energy_metrics"]["co2_emissions_g"]
+            )
+
+        return best_model
+
     def _log_classification(self, result: Dict):
         """Log classification result to database"""
         try:

@@ -17,10 +17,4 @@ if st.button("Classify", use_container_width=True):
             "force_escalate": bool(force)
         }
     }
-    try:
-        r = requests.post(f"{API_BASE}/classify-email", json=payload, timeout=20)
-        r.raise_for_status()
-        st.success("Done")
-        st.json(r.json())
-    except Exception as e:
-        st.error(f"Call failed: {e}")
+    

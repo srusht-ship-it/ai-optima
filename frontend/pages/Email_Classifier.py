@@ -1,5 +1,7 @@
-import requests, streamlit as st
+import requests
+import streamlit as st
 import json
+import pandas as pd
 
 API_BASE = st.secrets.get("API_BASE", "http://127.0.0.1:8000")
 st.title("📧 Email Classifier")
@@ -28,6 +30,22 @@ with col2:
         "priority": priority,
         "confidence_threshold": confidence_threshold
     }
+
+# Test connection button
+if st.button("🔗 Test API Connection"):
+    try:
+        response = requests.get(f"{API_BASE}/", timeout=5)
+        if response.status_code == 200:
+            st.success("✅ API server is running!")
+        else:
+            st.error(f"❌ API server returned status {response.status_code}")
+    except requests.exceptions.ConnectionError:
+        st.error("❌ Cannot connect to API server. Make sure it's running on the correct port.")
+    except Exception as e:
+        st.error(f"❌ Connection test failed: {e}")
+
+# Initialize result variable
+result = None
 
 if st.button("🔍 Classify Email", use_container_width=True):
     if not email_text.strip():
@@ -93,8 +111,27 @@ if st.button("🔍 Classify Email", use_container_width=True):
                 with st.expander("🔧 Technical Details"):
                     st.json(result)
                     
+            except requests.exceptions.ConnectionError:
+                st.error("❌ Cannot connect to API server. Please ensure your backend is running.")
+            except requests.exceptions.Timeout:
+                st.error("❌ Request timed out. The server might be overloaded.")
+            except requests.exceptions.HTTPError as e:
+                st.error(f"❌ HTTP error: {e}")
             except Exception as e:
                 st.error(f"❌ Classification failed: {e}")
+
+# Only show model results if classification was successful
+if result is not None:
+    st.subheader("🤖 All Model Results")
+    for model_name, model_result in result.get("other_model_results", {}).items():
+        if "confidence" in model_result:
+            st.markdown(
+                f"**{model_name}**: {model_result['predicted_category'].title()} "
+                f"({model_result['confidence']:.1%} confidence) - "
+                f"CO₂: {model_result['energy_metrics']['co2_emissions_g']:.3f}g"
+            )
+        else:
+            st.markdown(f"**{model_name}**: Error - {model_result.get('error')}")
 
 # Performance monitoring
 st.subheader("📈 Quick Stats")
@@ -109,5 +146,7 @@ try:
         col3.metric("Avg CO₂/Email", f"{stats['avg_co2_per_email_g']:.3f}g")
         col4.metric("Energy Saved", f"{stats['energy_savings_estimate']:.1f}g")
         
+except requests.exceptions.ConnectionError:
+    st.info("Stats unavailable - API server not connected. Start your backend server first!")
 except:
     st.info("Stats unavailable - start classifying emails to see performance metrics!")

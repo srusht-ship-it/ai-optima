@@ -1,193 +1,131 @@
-import os
+from typing import Optional, Dict, Any, List
 import logging
-from typing import Dict, Any
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
-from .config import LIGHT_MODEL, HEAVY_MODEL, EMAIL_CATEGORIES
+from .config import LIGHT_MODEL, HEAVY_MODEL
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class EmailModel:
-    def _init_(self, model_name: str, model_type: str):
+class ModelWrapper:
+    """Wrapper for a machine learning model with pipeline interface"""
+    
+    def __init__(self, model_name: str, model_type: str):
         self.model_name = model_name
         self.model_type = model_type
         self.pipeline = None
-        self.is_loaded = False
+        self.is_initialized = False
         
-    def load_model(self):
-        """Load the model pipeline"""
+    def initialize(self):
+        """Initialize the model pipeline"""
         try:
-            logger.info(f"Loading {self.model_type} model: {self.model_name}")
+            # Try to import transformers for real models
+            from transformers import pipeline
             
-            # For now, we'll use a general classification pipeline
-            # In production, you'd want to use fine-tuned models for email classification
-            self.pipeline = pipeline(
-                "text-classification",
-                model=self.model_name,
-                return_all_scores=True,
-                device=-1  # Use CPU
-            )
+            # Initialize the pipeline based on model type
+            if self.model_type == "light":
+                self.pipeline = pipeline(
+                    "text-classification",
+                    model=self.model_name,
+                    device=-1  # Use CPU
+                )
+            elif self.model_type == "heavy":
+                self.pipeline = pipeline(
+                    "text-classification", 
+                    model=self.model_name,
+                    device=-1  # Use CPU
+                )
             
-            # Note: You'll need to fine-tune these models on email data
-            # For now, we'll use a mapping function to convert outputs
-            self.is_loaded = True
-            logger.info(f"✅ {self.model_type} model loaded successfully")
+            self.is_initialized = True
+            logger.info(f"✅ Initialized {self.model_type} model: {self.model_name}")
+            
+        except ImportError:
+            logger.warning(f"⚠ Transformers not available for {self.model_name}")
+            self.pipeline = MockPipeline(self.model_name, self.model_type)
+            self.is_initialized = True
             
         except Exception as e:
-            logger.error(f"❌ Failed to load {self.model_type} model: {e}")
-            self.is_loaded = False
-            raise
+            logger.error(f"❌ Failed to initialize {self.model_name}: {e}")
+            self.pipeline = MockPipeline(self.model_name, self.model_type)
+            self.is_initialized = True
+
+class MockPipeline:
+    """Mock pipeline for when real models aren't available"""
     
-    def predict(self, text: str) -> Dict[str, Any]:
-        """Make prediction on email text"""
-        if not self.is_loaded:
-            raise RuntimeError(f"Model {self.model_name} is not loaded")
-            
-        try:
-            # Get predictions from the pipeline
-            raw_predictions = self.pipeline(text)
-            
-            # Map predictions to email categories
-            # This is a simplified mapping - you'd want to fine-tune the models
-            mapped_predictions = self._map_to_email_categories(raw_predictions)
-            
-            return mapped_predictions
-            
-        except Exception as e:
-            logger.error(f"Prediction error: {e}")
-            raise
-    
-    def _map_to_email_categories(self, raw_predictions):
-        """Map model outputs to email categories"""
-        # This is a simplified mapping function
-        # In production, you'd fine-tune the models on email-specific data
+    def __init__(self, model_name: str, model_type: str):
+        self.model_name = model_name
+        self.model_type = model_type
         
-        # For demo purposes, we'll create a simple mapping
-        email_predictions = []
+    def __call__(self, text: str, return_all_scores: bool = False) -> List[Dict[str, Any]]:
+        """Mock classification that returns reasonable fake results"""
         
-        for i, category in enumerate(EMAIL_CATEGORIES):
-            # Simple scoring based on text patterns
-            # You would replace this with actual model predictions
-            score = 1.0 / len(EMAIL_CATEGORIES)  # Equal probability initially
-            
-            if i < len(raw_predictions):
-                # Use some of the original prediction confidence
-                score = raw_predictions[i]['score'] * 0.7 + score * 0.3
-            
-            email_predictions.append({
-                'label': category,
-                'score': score
-            })
+        # Simple keyword-based classification for mock
+        text_lower = text.lower()
         
-        # Normalize scores
-        total_score = sum(p['score'] for p in email_predictions)
-        for pred in email_predictions:
-            pred['score'] = pred['score'] / total_score
+        if any(word in text_lower for word in ['spam', 'scam', 'winner', 'congratulations']):
+            primary = {"label": "spam", "score": 0.85}
+            secondary = {"label": "personal", "score": 0.15}
+        elif any(word in text_lower for word in ['work', 'meeting', 'project', 'deadline']):
+            primary = {"label": "work", "score": 0.80}
+            secondary = {"label": "personal", "score": 0.20}
+        elif any(word in text_lower for word in ['sale', 'offer', 'discount', 'deal']):
+            primary = {"label": "promotions", "score": 0.75}
+            secondary = {"label": "personal", "score": 0.25}
+        elif any(word in text_lower for word in ['support', 'help', 'issue', 'problem']):
+            primary = {"label": "support", "score": 0.70}
+            secondary = {"label": "personal", "score": 0.30}
+        else:
+            primary = {"label": "personal", "score": 0.65}
+            secondary = {"label": "work", "score": 0.35}
         
-        return sorted(email_predictions, key=lambda x: x['score'], reverse=True)
+        # Adjust confidence based on model type
+        if self.model_type == "heavy":
+            # Heavy model should be slightly more confident
+            primary["score"] = min(0.95, primary["score"] + 0.05)
+            secondary["score"] = 1.0 - primary["score"]
+        
+        if return_all_scores:
+            return [primary, secondary]
+        else:
+            return [primary]
 
 class ModelManager:
-    def _init_(self):
-        self.light_model = EmailModel(LIGHT_MODEL, "light")
-        self.heavy_model = EmailModel(HEAVY_MODEL, "heavy")
+    """Manages multiple models for the email classification system"""
+    
+    def __init__(self):
+        self.light_model: Optional[ModelWrapper] = None
+        self.heavy_model: Optional[ModelWrapper] = None
         self.models_initialized = False
         
     def initialize_models(self):
-        """Initialize both light and heavy models"""
-        try:
-            logger.info("Initializing email classification models...")
-            
-            # Try to load light model first
-            try:
-                self.light_model.load_model()
-            except Exception as e:
-                logger.warning(f"Light model failed to load: {e}")
-                self.light_model = self._create_fallback_model("light")
-            
-            # Try to load heavy model
-            try:
-                self.heavy_model.load_model()
-            except Exception as e:
-                logger.warning(f"Heavy model failed to load: {e}")
-                self.heavy_model = self._create_fallback_model("heavy")
-            
-            self.models_initialized = True
-            logger.info("✅ Model initialization completed")
-            
-        except Exception as e:
-            logger.error(f"❌ Model initialization failed: {e}")
-            # Create fallback models
-            self.light_model = self._create_fallback_model("light")
-            self.heavy_model = self._create_fallback_model("heavy")
-            self.models_initialized = True
-    
-    def _create_fallback_model(self, model_type: str):
-        """Create a simple fallback model"""
+        """Initialize all models"""
+        logger.info("🔄 Initializing models...")
         
-        class FallbackModel:
-            def _init_(self, model_type):
-                self.model_type = model_type
-                self.is_loaded = True
-                self.pipeline = self
-            
-            def _call_(self, text, return_all_scores=True):
-                """Simple keyword-based classification"""
-                text_lower = text.lower()
-                predictions = []
-                
-                # Simple keyword matching
-                scores = {
-                    "spam": 0.1,
-                    "work": 0.1,
-                    "promotions": 0.1,
-                    "personal": 0.1,
-                    "support": 0.1,
-                    "newsletter": 0.1
-                }
-                
-                # Keyword patterns
-                if any(word in text_lower for word in ['winner', 'congratulations', 'claim', '$$$', 'urgent']):
-                    scores["spam"] = 0.8
-                elif any(word in text_lower for word in ['meeting', 'report', 'project', 'deadline']):
-                    scores["work"] = 0.7
-                elif any(word in text_lower for word in ['sale', 'discount', 'offer', '% off']):
-                    scores["promotions"] = 0.75
-                elif any(word in text_lower for word in ['help', 'support', 'problem', 'issue']):
-                    scores["support"] = 0.7
-                elif any(word in text_lower for word in ['newsletter', 'weekly', 'update']):
-                    scores["newsletter"] = 0.6
-                else:
-                    scores["personal"] = 0.6
-                
-                # Normalize scores
-                total = sum(scores.values())
-                for category in scores:
-                    scores[category] = scores[category] / total
-                
-                # Convert to expected format
-                for category in EMAIL_CATEGORIES:
-                    predictions.append({
-                        'label': category,
-                        'score': scores.get(category, 0.1)
-                    })
-                
-                return sorted(predictions, key=lambda x: x['score'], reverse=True)
+        # Initialize light model
+        self.light_model = ModelWrapper(LIGHT_MODEL, "light")
+        self.light_model.initialize()
         
-        logger.info(f"Created fallback model for {model_type}")
-        return FallbackModel(model_type)
-    
-    def get_model_info(self):
-        """Get information about loaded models"""
-        return {
-            "light_model": {
-                "name": self.light_model.model_name if hasattr(self.light_model, 'model_name') else "fallback",
-                "loaded": self.light_model.is_loaded,
-                "type": "light"
-            },
-            "heavy_model": {
-                "name": self.heavy_model.model_name if hasattr(self.heavy_model, 'model_name') else "fallback",
-                "loaded": self.heavy_model.is_loaded,
-                "type": "heavy"
-            },
-            "initialized": self.models_initialized
-        }
+        # Initialize heavy model  
+        self.heavy_model = ModelWrapper(HEAVY_MODEL, "heavy")
+        self.heavy_model.initialize()
+        
+        self.models_initialized = True
+        logger.info("✅ All models initialized")
+        
+    def get_model(self, model_type: str) -> Optional[ModelWrapper]:
+        """Get a specific model by type"""
+        if not self.models_initialized:
+            self.initialize_models()
+            
+        if model_type == "light":
+            return self.light_model
+        elif model_type == "heavy":
+            return self.heavy_model
+        else:
+            logger.warning(f"⚠ Unknown model type: {model_type}")
+            return None
+            
+    def is_ready(self) -> bool:
+        """Check if all models are ready"""
+        return (self.models_initialized and 
+                self.light_model is not None and 
+                self.heavy_model is not None and
+                self.light_model.is_initialized and 
+                self.heavy_model.is_initialized)

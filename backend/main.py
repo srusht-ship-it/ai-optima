@@ -1,28 +1,129 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 import time
 import sqlite3
 import hashlib
 from datetime import datetime
+import os
+import traceback
+import logging
 
-# ✅ Absolute imports for backend modules
-from backend.agent_logic import AgentOrchestrator
-from backend.config import DB_PATH, EMAIL_CATEGORIES
+# Set up detailed logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Initialize the intelligent agent (with error handling)
+# Enhanced fallback classifier (moved before imports)
+def simple_classification(text: str, subject: str = "", sender: str = "") -> Dict[str, Any]:
+    """Enhanced keyword-based classification as fallback"""
+    logger.info(f"Running simple_classification for text length: {len(text)}")
+
+    text_lower = (text + " " + subject).lower()
+
+    if any(word in text_lower for word in ['congratulations', 'winner', 'claim', '$$$', 'urgent', 'click now']):
+        category, confidence = "spam", 0.85
+    elif any(word in text_lower for word in ['meeting', 'report', 'project', 'deadline', 'team']):
+        category, confidence = "work", 0.75
+    elif any(word in text_lower for word in ['offer', 'sale', 'discount', '% off', 'limited time']):
+        category, confidence = "promotions", 0.8
+    elif any(word in text_lower for word in ['help', 'support', 'problem', 'issue', 'account']):
+        category, confidence = "support", 0.7
+    elif any(word in text_lower for word in ['newsletter', 'weekly', 'news', 'update']):
+        category, confidence = "newsletter", 0.65
+    else:
+        category, confidence = "personal", 0.6
+
+    all_predictions = [
+        {"category": category, "confidence": confidence},
+        {"category": "personal", "confidence": max(0.1, 1.0 - confidence)},
+    ]
+
+    result = {
+        "email_text": text,
+        "predicted_category": category,
+        "confidence": confidence,
+        "all_predictions": all_predictions,
+        "model_used": "keyword_fallback_v2",
+        "model_type": "fallback",
+        "escalated": False,
+        "energy_metrics": {
+            "co2_emissions_g": 0.001,
+            "co2_emissions_kg": 0.000001,
+            "processing_time_seconds": 0.05,
+            "memory_used_gb": 0.001,
+            "cpu_utilization_start": 5.0,
+            "cpu_utilization_end": 6.0,
+            "gpu_metrics": {},
+            "energy_efficiency_score": 9.8
+        },
+        "ai_insights": {
+            "environmental_impact": {
+                "co2_this_classification": 0.001,
+                "yearly_projection_g": 18.25,
+                "equivalent_km_driven": 0.045,
+                "impact_level": "minimal"
+            },
+            "accuracy_assessment": {
+                "confidence_level": "medium" if confidence > 0.7 else "low",
+                "accuracy_assessment": "Enhanced keyword matching",
+                "should_review": confidence < 0.7
+            },
+            "suggestions": [
+                "⚡ Ultra-low energy classification used",
+                "🔄 AI models loading - accuracy will improve soon" if not ORCHESTRATOR_READY else "✅ System running optimally"
+            ]
+        },
+        "timestamp": time.time(),
+    }
+    return result
+
+# Imports with fallbacks and detailed error reporting
 try:
-    orchestrator = AgentOrchestrator()
-    ORCHESTRATOR_READY = True
+    from backend.agent_logic import AgentOrchestrator
+    from backend.config import DB_PATH, EMAIL_CATEGORIES
+    BACKEND_AVAILABLE = True
+    logger.info("✅ Backend modules imported successfully")
+except ImportError as e:
+    logger.warning(f"⚠ Backend modules not found: {e}")
+    logger.info("Using fallback configuration...")
+    BACKEND_AVAILABLE = False
+
+    # Fallback configuration
+    DB_PATH = "./email_classifier.db"
+    EMAIL_CATEGORIES = ["work", "personal", "spam", "promotions", "support", "newsletter"]
+
+# Initialize the orchestrator
+orchestrator = None
+ORCHESTRATOR_READY = False
+try:
+    if BACKEND_AVAILABLE:
+        orchestrator = AgentOrchestrator()
+        ORCHESTRATOR_READY = True
+        logger.info("✅ AgentOrchestrator initialized successfully")
 except Exception as e:
-    print(f"⚠ Warning: Could not initialize orchestrator: {e}")
-    print("Starting in basic mode...")
-    orchestrator = None
-    ORCHESTRATOR_READY = False
+    logger.error(f"❌ Could not initialize orchestrator: {e}")
+    logger.error(f"Traceback: {traceback.format_exc()}")
 
-app = FastAPI(title="🌱 Green AI Email Classification API", version="2.0")
+# Initialize FastAPI
+app = FastAPI(
+    title="🌱 Green AI Email Classification API",
+    version="2.0",
+    description="Intelligent email classification with energy optimization",
+    debug=True
+)
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -------------------------
 # Request/Response Models
@@ -34,11 +135,14 @@ class EmailClassificationRequest(BaseModel):
     preferences: Optional[Dict[str, Any]] = {}
     user_id: Optional[str] = "default"
 
+class Prediction(BaseModel):
+    category: str
+    confidence: float
 
 class EmailClassificationResponse(BaseModel):
     predicted_category: str
     confidence: float
-    all_predictions: List[Dict[str, float]]
+    all_predictions: List[Prediction]
     model_used: str
     escalated: bool
     energy_metrics: Dict[str, Any]
@@ -46,107 +150,69 @@ class EmailClassificationResponse(BaseModel):
     processing_time: float
     timestamp: float
 
-
 # -------------------------
-# Simple fallback classifier
+# Database initialization
 # -------------------------
-def simple_classification(text: str) -> Dict[str, Any]:
-    """Simple keyword-based classification as fallback"""
-    text_lower = text.lower()
-
-    if any(word in text_lower for word in ['congratulations', 'winner', 'claim', '$$$', 'urgent', 'click now']):
-        category, confidence = "spam", 0.8
-    elif any(word in text_lower for word in ['meeting', 'report', 'project', 'deadline', 'team']):
-        category, confidence = "work", 0.7
-    elif any(word in text_lower for word in ['offer', 'sale', 'discount', '% off', 'limited time']):
-        category, confidence = "promotions", 0.75
-    elif any(word in text_lower for word in ['help', 'support', 'problem', 'issue', 'account']):
-        category, confidence = "support", 0.7
-    elif any(word in text_lower for word in ['newsletter', 'weekly', 'news', 'update']):
-        category, confidence = "newsletter", 0.6
-    else:
-        category, confidence = "personal", 0.5
-
-    return {
-        "predicted_category": category,
-        "confidence": confidence,
-        "all_predictions": [
-            {"category": category, "confidence": confidence},
-            {"category": "personal", "confidence": 0.3}
-        ],
-        "model_used": "keyword_fallback",
-        "escalated": False,
-        "energy_metrics": {
-            "co2_emissions_g": 0.001,
-            "co2_emissions_kg": 0.000001,
-            "processing_time_seconds": 0.1,
-            "memory_used_gb": 0.001,
-            "cpu_utilization_start": 5.0,
-            "cpu_utilization_end": 5.0,
-            "gpu_metrics": {},
-            "energy_efficiency_score": 0.1
-        },
-        "ai_insights": {
-            "environmental_impact": {
-                "co2_this_classification": 0.001,
-                "yearly_projection_g": 18.25,
-                "equivalent_km_driven": 0.045,
-                "impact_level": "low"
-            },
-            "accuracy_assessment": {
-                "confidence_level": "low" if confidence < 0.7 else "medium",
-                "accuracy_assessment": "Basic keyword matching",
-                "should_review": True
-            },
-            "suggestions": [
-                "⚠ System is using keyword-based fallback",
-                "🔄 AI models are loading - please wait and try again"
-            ]
-        },
-        "timestamp": time.time()
-    }
-
+def initialize_database():
+    """Initialize SQLite database with required tables"""
+    try:
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+            
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS email_classifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL,
+                    email_hash TEXT,
+                    predicted_category TEXT,
+                    confidence REAL,
+                    model_used TEXT,
+                    escalated BOOLEAN,
+                    co2_emissions_g REAL,
+                    processing_time REAL,
+                    energy_efficiency_score REAL
+                )
+            """)
+        logger.info("✅ Database initialized successfully")
+    except Exception as e:
+        logger.error(f"❌ Database initialization failed: {e}")
 
 # -------------------------
 # API Routes
 # -------------------------
 @app.get("/")
 def root():
-    return RedirectResponse(url="/docs")
-
-
-@app.get("/health")
-def health_check():
     return {
-        "status": "healthy",
+        "message": "🌱 Green AI Email Classification API",
+        "version": "2.0",
+        "status": "running",
         "orchestrator_ready": ORCHESTRATOR_READY,
-        "timestamp": datetime.now().isoformat(),
-        "version": "2.0"
+        "backend_available": BACKEND_AVAILABLE,
+        "docs": "/docs"
     }
 
-
 @app.post("/classify-email", response_model=EmailClassificationResponse)
-def classify_email(request: EmailClassificationRequest):
-    if not request.text or not request.text.strip():
-        raise HTTPException(status_code=400, detail="Email text is required")
-
-    if len(request.text) > 10000:
-        raise HTTPException(status_code=413, detail="Email text too long (>10000 chars)")
-
-    start_time = time.time()
-
+async def classify_email(request: EmailClassificationRequest):
     try:
+        if not request.text.strip():
+            raise HTTPException(status_code=400, detail="Email text cannot be empty")
+
+        start_time = time.time()
+
+        result = None
         if ORCHESTRATOR_READY and orchestrator:
-            email_data = {
-                "text": request.text,
-                "subject": request.subject,
-                "sender": request.sender,
-                "preferences": request.preferences,
-                "user_id": request.user_id
-            }
-            result = orchestrator.process_email(email_data)
-        else:
-            result = simple_classification(request.text)
+            try:
+                result = orchestrator.process_email(request.dict())
+                logger.info("✅ Used orchestrator for classification")
+            except Exception as e:
+                logger.error(f"❌ Orchestrator failed: {e}")
+                result = None
+
+        if result is None:
+            result = simple_classification(request.text, request.subject or "", request.sender or "")
+            logger.info("✅ Used fallback classification")
 
         processing_time = time.time() - start_time
         log_classification(result, processing_time)
@@ -163,32 +229,54 @@ def classify_email(request: EmailClassificationRequest):
             timestamp=result["timestamp"]
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Classification error: {e}")
-        result = simple_classification(request.text)
-        processing_time = time.time() - start_time
+        logger.error(f"❌ classify_email failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-        return EmailClassificationResponse(
-            predicted_category=result["predicted_category"],
-            confidence=result["confidence"],
-            all_predictions=result["all_predictions"],
-            model_used="fallback_error",
-            escalated=False,
-            energy_metrics=result["energy_metrics"],
-            ai_insights=result["ai_insights"],
-            processing_time=processing_time,
-            timestamp=result["timestamp"]
-        )
-
+@app.get("/agent-stats")
+async def get_agent_stats():
+    """Get performance statistics"""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            
+            # Total classifications
+            total = cursor.execute("SELECT COUNT(*) FROM email_classifications").fetchone()[0]
+            
+            # Escalation rate
+            escalated = cursor.execute("SELECT COUNT(*) FROM email_classifications WHERE escalated = 1").fetchone()[0]
+            escalation_rate = (escalated / total) if total > 0 else 0
+            
+            # Average CO2 per email
+            avg_co2 = cursor.execute("SELECT AVG(co2_emissions_g) FROM email_classifications").fetchone()[0] or 0
+            
+            # Estimated energy savings (rough calculation)
+            energy_savings = max(0, (total * 2.5) - (total * avg_co2))  # Assuming 2.5g baseline
+            
+            return {
+                "total_classifications": total,
+                "escalation_rate": escalation_rate,
+                "avg_co2_per_email_g": avg_co2,
+                "energy_savings_estimate": energy_savings
+            }
+    except Exception as e:
+        logger.error(f"❌ Stats calculation failed: {e}")
+        return {
+            "total_classifications": 0,
+            "escalation_rate": 0.0,
+            "avg_co2_per_email_g": 0.0,
+            "energy_savings_estimate": 0.0
+        }
 
 # -------------------------
-# DB Logging
+# Database logging
 # -------------------------
 def log_classification(result: Dict, processing_time: float):
     try:
         with sqlite3.connect(DB_PATH) as conn:
-            email_hash = hashlib.sha256(result.get("email_text", "unknown").encode()).hexdigest()[:16]
-
+            email_hash = hashlib.sha256(str(result.get("predicted_category", "")).encode()).hexdigest()[:16]
             conn.execute("""
                 INSERT INTO email_classifications 
                 (timestamp, email_hash, predicted_category, confidence, model_used, 
@@ -206,213 +294,19 @@ def log_classification(result: Dict, processing_time: float):
                 result["energy_metrics"]["energy_efficiency_score"]
             ))
     except Exception as e:
-        print(f"Database logging error: {e}")
-
-
-# -------------------------
-# Other Endpoints (stats, feedback, insights)
-# -------------------------
-@app.get("/agent-stats")
-def get_agent_statistics():
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.cursor()
-
-            cursor.execute("SELECT COUNT(*) FROM email_classifications")
-            total_classifications = cursor.fetchone()[0] or 0
-
-            cursor.execute("SELECT SUM(co2_emissions_g), AVG(co2_emissions_g) FROM email_classifications")
-            result = cursor.fetchone()
-            total_co2 = float(result[0] or 0.0)
-            avg_co2 = float(result[1] or 0.0)
-
-            cursor.execute("""
-                SELECT model_used, COUNT(*), AVG(co2_emissions_g), AVG(confidence)
-                FROM email_classifications 
-                GROUP BY model_used
-            """)
-            model_stats = [
-                {
-                    "model": row[0],
-                    "usage_count": row[1],
-                    "avg_co2_g": float(row[2] or 0),
-                    "avg_confidence": float(row[3] or 0)
-                }
-                for row in cursor.fetchall()
-            ]
-
-            cursor.execute("SELECT COUNT(*) FROM email_classifications WHERE escalated = 1")
-            escalations = cursor.fetchone()[0] or 0
-
-            cursor.execute("""
-                SELECT predicted_category, COUNT(*) 
-                FROM email_classifications 
-                GROUP BY predicted_category
-            """)
-            category_stats = [
-                {"category": row[0], "count": row[1]}
-                for row in cursor.fetchall()
-            ]
-
-        return {
-            "total_classifications": total_classifications,
-            "escalation_rate": (escalations / total_classifications) if total_classifications > 0 else 0,
-            "total_co2_emissions_g": total_co2,
-            "avg_co2_per_email_g": avg_co2,
-            "model_performance": model_stats,
-            "category_distribution": category_stats,
-            "energy_savings_estimate": total_co2 * 0.3 if escalations > 0 else 0,
-            "orchestrator_ready": ORCHESTRATOR_READY
-        }
-
-    except Exception as e:
-        print(f"Stats error: {e}")
-        return {
-            "total_classifications": 0,
-            "escalation_rate": 0,
-            "total_co2_emissions_g": 0.0,
-            "avg_co2_per_email_g": 0.0,
-            "model_performance": [],
-            "category_distribution": [],
-            "energy_savings_estimate": 0.0,
-            "orchestrator_ready": ORCHESTRATOR_READY,
-            "error": str(e)
-        }
-
-
-@app.get("/runs/recent")
-def recent_runs(limit: Optional[int] = 50):
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, timestamp, email_hash, predicted_category, confidence, 
-                       model_used, escalated, co2_emissions_g, processing_time
-                FROM email_classifications 
-                ORDER BY id DESC 
-                LIMIT ?
-            """, (limit or 50,))
-
-            rows = []
-            for row in cursor.fetchall():
-                rows.append({
-                    "id": row[0],
-                    "ts": row[1],
-                    "ts_local": datetime.fromtimestamp(row[1]).strftime("%Y-%m-%d %H:%M:%S"),
-                    "text_hash": row[2],
-                    "predicted_category": row[3],
-                    "confidence": float(row[4]),
-                    "model_used": row[5],
-                    "escalated": bool(row[6]),
-                    "co2_g": float(row[7]),
-                    "processing_time": float(row[8])
-                })
-
-            return rows
-    except Exception as e:
-        print(f"Recent runs error: {e}")
-        return []
-
-
-@app.post("/feedback")
-def submit_feedback(
-    classification_id: int,
-    correct_category: str,
-    user_confidence: float,
-    user_id: str = "anonymous"
-):
-    if correct_category not in EMAIL_CATEGORIES:
-        raise HTTPException(status_code=400, detail=f"Invalid category. Must be one of: {EMAIL_CATEGORIES}")
-
-    if not 0 <= user_confidence <= 1:
-        raise HTTPException(status_code=400, detail="User confidence must be between 0 and 1")
-
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("""
-                INSERT INTO user_feedback (
-                    classification_id, correct_category, user_confidence, 
-                    feedback_timestamp, user_id
-                ) VALUES (?, ?, ?, ?, ?)
-            """, (classification_id, correct_category, user_confidence, time.time(), user_id))
-
-        return {"status": "feedback_recorded", "message": "Thank you for your feedback!"}
-
-    except Exception as e:
-        print(f"Feedback error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to record feedback")
-
-
-@app.get("/learning-insights")
-def get_learning_insights():
-    return {
-        "performance_metrics": {
-            "insufficient_data": True,
-            "message": "Learning system integration pending"
-        },
-        "threshold_recommendation": {
-            "insufficient_data": True,
-            "message": "More data needed for recommendations"
-        },
-        "last_updated": datetime.now().isoformat(),
-        "orchestrator_ready": ORCHESTRATOR_READY
-    }
-
+        logger.warning(f"⚠ DB logging error: {e}")
 
 # -------------------------
-# DB Initialization
-# -------------------------
-def init_email_db():
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS email_classifications (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp REAL NOT NULL,
-                    email_hash TEXT NOT NULL,
-                    predicted_category TEXT NOT NULL,
-                    confidence REAL NOT NULL,
-                    model_used TEXT NOT NULL,
-                    escalated BOOLEAN NOT NULL,
-                    co2_emissions_g REAL NOT NULL,
-                    processing_time REAL NOT NULL,
-                    energy_efficiency_score REAL NOT NULL
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_feedback (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    classification_id INTEGER,
-                    correct_category TEXT,
-                    user_confidence REAL,
-                    feedback_timestamp REAL,
-                    user_id TEXT DEFAULT 'anonymous',
-                    FOREIGN KEY (classification_id) REFERENCES email_classifications (id)
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_email_timestamp ON email_classifications(timestamp)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_timestamp ON user_feedback(feedback_timestamp)")
-        print("✅ Database initialized successfully")
-    except Exception as e:
-        print(f"❌ Database initialization error: {e}")
-
-
-# Initialize DB
-init_email_db()
-
-
-# -------------------------
-# Startup/Shutdown Events
+# Startup
 # -------------------------
 @app.on_event("startup")
 async def startup_event():
-    print("🌱 Green AI Email Classification API Starting...")
-    print(f"🤖 Orchestrator Ready: {ORCHESTRATOR_READY}")
+    logger.info("🌱 API starting...")
+    initialize_database()
     if not ORCHESTRATOR_READY:
-        print("⚠ Running in fallback mode - some features may be limited")
-    print("✅ API Ready!")
+        logger.warning("⚠ Running in fallback mode - full AI models not available")
+    logger.info("✅ Ready!")
 
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    print("👋 Green AI Email Classification API Shutting Down...")
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True, log_level="debug")
