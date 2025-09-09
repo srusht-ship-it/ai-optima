@@ -252,14 +252,55 @@ async def get_agent_stats():
             # Average CO2 per email
             avg_co2 = cursor.execute("SELECT AVG(co2_emissions_g) FROM email_classifications").fetchone()[0] or 0
             
+            # Total CO2 emissions (sum all emissions)
+            total_co2 = cursor.execute("SELECT SUM(co2_emissions_g) FROM email_classifications").fetchone()[0] or 0
+            
+            # Model performance data - FIXED FIELD NAMES
+            model_performance = cursor.execute("""
+                SELECT model_used as model, 
+                       COUNT(*) as count,
+                       AVG(confidence) as avg_confidence,
+                       AVG(energy_efficiency_score) as avg_efficiency,
+                       AVG(co2_emissions_g) as avg_co2_g
+                FROM email_classifications 
+                GROUP BY model_used
+            """).fetchall()
+            
+            model_performance_list = [
+                {
+                    "model": row[0],
+                    "count": row[1],  # Changed from usage_count to count
+                    "avg_confidence": round(row[2] or 0, 3),
+                    "avg_efficiency": round(row[3] or 0, 2),
+                    "avg_co2_g": round(row[4] or 0, 6)  # Added avg_co2_g field
+                }
+                for row in model_performance
+            ]
+            
+            # Category distribution
+            category_distribution = cursor.execute("""
+                SELECT predicted_category as category, COUNT(*) as count
+                FROM email_classifications 
+                GROUP BY predicted_category
+                ORDER BY count DESC
+            """).fetchall()
+            
+            category_distribution_list = [
+                {"category": row[0], "count": row[1]}
+                for row in category_distribution
+            ]
+            
             # Estimated energy savings (rough calculation)
-            energy_savings = max(0, (total * 2.5) - (total * avg_co2))  # Assuming 2.5g baseline
+            energy_savings = max(0, (total * 2.5) - total_co2)  # Assuming 2.5g baseline
             
             return {
                 "total_classifications": total,
                 "escalation_rate": escalation_rate,
                 "avg_co2_per_email_g": avg_co2,
-                "energy_savings_estimate": energy_savings
+                "total_co2_emissions_g": total_co2,
+                "energy_savings_estimate": energy_savings,
+                "model_performance": model_performance_list,
+                "category_distribution": category_distribution_list
             }
     except Exception as e:
         logger.error(f"❌ Stats calculation failed: {e}")
@@ -267,9 +308,190 @@ async def get_agent_stats():
             "total_classifications": 0,
             "escalation_rate": 0.0,
             "avg_co2_per_email_g": 0.0,
-            "energy_savings_estimate": 0.0
+            "total_co2_emissions_g": 0.0,
+            "energy_savings_estimate": 0.0,
+            "model_performance": [],
+            "category_distribution": []
         }
 
+# Also add the missing /learning-insights endpoint that your analytics dashboard expects
+@app.get("/learning-insights")
+async def get_learning_insights():
+    """Get learning and performance insights"""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            
+            # Get total classifications for data sufficiency check
+            total = cursor.execute("SELECT COUNT(*) FROM email_classifications").fetchone()[0]
+            
+            if total < 10:  # Not enough data
+                return {
+                    "performance_metrics": {
+                        "insufficient_data": True,
+                        "data_points_needed": 10 - total
+                    },
+                    "threshold_recommendation": {
+                        "insufficient_data": True
+                    }
+                }
+            
+            # Calculate performance metrics
+            avg_confidence = cursor.execute("SELECT AVG(confidence) FROM email_classifications").fetchone()[0] or 0
+            
+            # Simulate light vs heavy model accuracy (you can replace with actual logic)
+            light_model_count = cursor.execute("SELECT COUNT(*) FROM email_classifications WHERE model_used = 'keyword_fallback_v2'").fetchone()[0]
+            heavy_model_count = total - light_model_count
+            
+            light_accuracy = 0.75 if light_model_count > 0 else 0  # Simulated
+            heavy_accuracy = 0.92 if heavy_model_count > 0 else 0  # Simulated
+            overall_accuracy = (light_accuracy * light_model_count + heavy_accuracy * heavy_model_count) / total if total > 0 else 0
+            
+            # Generate improvement suggestions
+            suggestions = []
+            if avg_confidence < 0.7:
+                suggestions.append("Consider tuning confidence thresholds")
+            if light_model_count / total > 0.8:
+                suggestions.append("High fallback usage - consider improving primary models")
+            if escalated := cursor.execute("SELECT COUNT(*) FROM email_classifications WHERE escalated = 1").fetchone()[0]:
+                if escalated / total > 0.1:
+                    suggestions.append("High escalation rate - review classification logic")
+            
+            # Threshold recommendation
+            current_threshold = 0.85  # Your current threshold
+            recommended_threshold = current_threshold
+            
+            if avg_confidence > 0.9:
+                recommended_threshold = 0.80  # Can be more aggressive
+            elif avg_confidence < 0.6:
+                recommended_threshold = 0.90  # Be more conservative
+            
+            return {
+                "performance_metrics": {
+                    "insufficient_data": False,
+                    "overall_accuracy": overall_accuracy,
+                    "light_model_accuracy": light_accuracy,
+                    "heavy_model_accuracy": heavy_accuracy,
+                    "improvement_suggestions": suggestions
+                },
+                "threshold_recommendation": {
+                    "insufficient_data": False,
+                    "current_threshold": current_threshold,
+                    "recommended_threshold": recommended_threshold
+                }
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Learning insights failed: {e}")
+        return {
+            "performance_metrics": {"insufficient_data": True},
+            "threshold_recommendation": {"insufficient_data": True}
+        }
+# Add this endpoint to your main.py file after the existing routes
+
+@app.get("/runs/recent")
+async def get_recent_runs(limit: int = 50):
+    """Get recent email classification runs"""
+    try:
+        # Validate limit parameter
+        limit = max(1, min(limit, 1000))  # Between 1 and 1000
+        
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            
+            # Get recent runs with all relevant data
+            cursor.execute("""
+                SELECT 
+                    id,
+                    timestamp,
+                    email_hash as text_hash,
+                    predicted_category as label,
+                    confidence,
+                    model_used,
+                    escalated,
+                    co2_emissions_g as co2_g,
+                    processing_time,
+                    energy_efficiency_score
+                FROM email_classifications 
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            """, (limit,))
+            
+            rows = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            columns = [
+                "id", "timestamp", "text_hash", "label", "confidence", 
+                "model_used", "escalated", "co2_g", "processing_time", 
+                "energy_efficiency_score"
+            ]
+            
+            results = []
+            for row in rows:
+                result = dict(zip(columns, row))
+                
+                # Convert timestamp to local time string for display
+                if result["timestamp"]:
+                    from datetime import datetime
+                    dt = datetime.fromtimestamp(result["timestamp"])
+                    result["ts_local"] = dt.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    result["ts_local"] = "N/A"
+                
+                # Add mode field (you can customize this based on your logic)
+                if result["model_used"] == "keyword_fallback_v2":
+                    result["mode"] = "fallback"
+                else:
+                    result["mode"] = "ai"
+                
+                # Round numeric values for display
+                if result["confidence"]:
+                    result["confidence"] = round(result["confidence"], 3)
+                if result["co2_g"]:
+                    result["co2_g"] = round(result["co2_g"], 6)
+                if result["processing_time"]:
+                    result["processing_time"] = round(result["processing_time"], 4)
+                if result["energy_efficiency_score"]:
+                    result["energy_efficiency_score"] = round(result["energy_efficiency_score"], 2)
+                
+                results.append(result)
+            
+            return results
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to get recent runs: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve recent runs: {str(e)}")
+
+# Also add this helper endpoint for debugging
+@app.get("/debug/tables")
+async def debug_tables():
+    """Debug endpoint to check database structure"""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            
+            # Get table info
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = cursor.fetchall()
+            
+            result = {"tables": []}
+            for (table_name,) in tables:
+                cursor.execute(f"PRAGMA table_info({table_name})")
+                columns = cursor.fetchall()
+                
+                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                count = cursor.fetchone()[0]
+                
+                result["tables"].append({
+                    "name": table_name,
+                    "columns": [{"name": col[1], "type": col[2]} for col in columns],
+                    "row_count": count
+                })
+            
+            return result
+    except Exception as e:
+        logger.error(f"❌ Debug tables failed: {e}")
+        return {"error": str(e)}
 # -------------------------
 # Database logging
 # -------------------------
