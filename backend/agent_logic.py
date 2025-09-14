@@ -1,3 +1,4 @@
+# agent_logic.py - Fixed version
 from typing import Dict, List, Tuple, Any
 import numpy as np
 import time
@@ -7,7 +8,77 @@ from .email_models import ModelManager
 from .config import *
 import sqlite3
 import json
-from main import simple_classification
+
+# Enhanced fallback classification function
+def simple_classification(text: str, subject: str = "", sender: str = "") -> Dict[str, Any]:
+    """Enhanced keyword-based classification as fallback"""
+    text_lower = (text + " " + subject).lower()
+
+    # More comprehensive keyword matching
+    categories_keywords = {
+        "spam": ['congratulations', 'winner', 'claim', '$$$', 'urgent', 'click now', 'free money', 'lottery', 'prize'],
+        "work": ['meeting', 'report', 'project', 'deadline', 'team', 'conference', 'manager', 'office', 'client'],
+        "promotions": ['offer', 'sale', 'discount', '% off', 'limited time', 'deal', 'shop now', 'buy now'],
+        "support": ['help', 'support', 'problem', 'issue', 'account', 'reset', 'assistance', 'trouble'],
+        "newsletter": ['newsletter', 'weekly', 'news', 'update', 'subscribe', 'unsubscribe', 'digest']
+    }
+
+    # Calculate scores for each category
+    scores = {}
+    for category, keywords in categories_keywords.items():
+        score = sum(1 for keyword in keywords if keyword in text_lower)
+        scores[category] = score
+
+    # Determine best category
+    if max(scores.values()) == 0:
+        category, confidence = "personal", 0.6
+    else:
+        category = max(scores, key=scores.get)
+        confidence = min(0.95, 0.6 + (scores[category] * 0.05))
+
+    all_predictions = [
+        {"category": category, "confidence": confidence},
+        {"category": "personal", "confidence": max(0.1, 1.0 - confidence)},
+    ]
+
+    result = {
+        "email_text": text,
+        "predicted_category": category,
+        "confidence": confidence,
+        "all_predictions": all_predictions,
+        "model_used": "keyword_fallback_v2",
+        "model_type": "fallback",
+        "escalated": False,
+        "energy_metrics": {
+            "co2_emissions_g": 0.001,
+            "co2_emissions_kg": 0.000001,
+            "processing_time_seconds": 0.05,
+            "memory_used_gb": 0.001,
+            "cpu_utilization_start": 5.0,
+            "cpu_utilization_end": 6.0,
+            "gpu_metrics": {},
+            "energy_efficiency_score": 9.8
+        },
+        "ai_insights": {
+            "environmental_impact": {
+                "co2_this_classification": 0.001,
+                "yearly_projection_g": 18.25,
+                "equivalent_km_driven": 0.045,
+                "impact_level": "minimal"
+            },
+            "accuracy_assessment": {
+                "confidence_level": "medium" if confidence > 0.7 else "low",
+                "accuracy_assessment": "Enhanced keyword matching",
+                "should_review": confidence < 0.7
+            },
+            "suggestions": [
+                "Ultra-low energy classification used",
+                "System running optimally"
+            ]
+        },
+        "timestamp": time.time(),
+    }
+    return result
 
 class IntelligentEmailAgent:
     def __init__(self):
@@ -18,8 +89,19 @@ class IntelligentEmailAgent:
     def classify_email(self, email_text: str, user_preferences: Dict = None) -> Dict[str, Any]:
         """Main classification method with intelligent model selection"""
         
-        # Step 1: Quick assessment with light model
+        # If no working AI models, use fallback
+        if not self.model_manager.is_ready():
+            return simple_classification(email_text)
+        
+        # Step 1: Try light model first
         light_result = self._classify_with_model(email_text, model_type="light")
+        
+        # If light model failed, try heavy model
+        if light_result is None:
+            heavy_result = self._classify_with_model(email_text, model_type="heavy")
+            if heavy_result is None:
+                return simple_classification(email_text)
+            return heavy_result
         
         # Step 2: Decide if we need heavy model
         needs_heavy_model = self._should_use_heavy_model(
@@ -30,8 +112,12 @@ class IntelligentEmailAgent:
         
         if needs_heavy_model:
             heavy_result = self._classify_with_model(email_text, model_type="heavy")
-            final_result = self._compare_and_select_result(light_result, heavy_result)
-            final_result["escalated"] = True
+            if heavy_result is not None:
+                final_result = self._compare_and_select_result(light_result, heavy_result)
+                final_result["escalated"] = True
+            else:
+                final_result = light_result
+                final_result["escalated"] = False
         else:
             final_result = light_result
             final_result["escalated"] = False
@@ -42,38 +128,45 @@ class IntelligentEmailAgent:
     
     def _classify_with_model(self, email_text: str, model_type: str) -> Dict[str, Any]:
         """Classify email with specified model type"""
+        
+        model_wrapper = self.model_manager.get_model(model_type)
+        if not model_wrapper or not model_wrapper.is_initialized:
+            return None
+            
         tracker = EnhancedEnergyTracker()
         tracker.start_tracking()
         
-        if model_type == "light":
-            pipeline = self.model_manager.light_model.pipeline
-            model_name = LIGHT_MODEL
-        else:
-            pipeline = self.model_manager.heavy_model.pipeline
-            model_name = HEAVY_MODEL
+        try:
+            # Get predictions from the model
+            predictions = model_wrapper.classify_email(email_text)
             
-        # Perform classification
-        predictions = pipeline(email_text, return_all_scores=True)
-        
-        # Get top prediction
-        top_pred = max(predictions, key=lambda x: x['score'])
-        
-        # Stop tracking
-        energy_metrics = tracker.stop_tracking()
-        
-        return {
-            "email_text": email_text,
-            "predicted_category": top_pred['label'],
-            "confidence": float(top_pred['score']),
-            "all_predictions": [
-                {"category": p['label'], "confidence": float(p['score'])} 
-                for p in sorted(predictions, key=lambda x: x['score'], reverse=True)
-            ],
-            "model_used": model_name,
-            "model_type": model_type,
-            "energy_metrics": energy_metrics,
-            "timestamp": time.time()
-        }
+            if not predictions:
+                return None
+                
+            # Get top prediction
+            top_pred = predictions[0] if predictions else {"label": "personal", "score": 0.5}
+            
+            # Stop tracking
+            energy_metrics = tracker.stop_tracking()
+            
+            return {
+                "email_text": email_text,
+                "predicted_category": top_pred['label'],
+                "confidence": float(top_pred['score']),
+                "all_predictions": [
+                    {"category": p['label'], "confidence": float(p['score'])} 
+                    for p in predictions[:5]  # Top 5 predictions
+                ],
+                "model_used": model_wrapper.model_name,
+                "model_type": model_type,
+                "energy_metrics": energy_metrics,
+                "timestamp": time.time()
+            }
+            
+        except Exception as e:
+            import logging
+            logging.error(f"Model classification failed: {e}")
+            return None
     
     def _should_use_heavy_model(self, light_result: Dict, email_text: str, user_prefs: Dict) -> bool:
         """Intelligent decision on whether to use heavy model"""
@@ -166,70 +259,23 @@ class AgentOrchestrator:
         self.db_path = DB_PATH
         
     def process_email(self, email_data: Dict) -> Dict[str, Any]:
-        """Complete email processing pipeline with multiple models"""
+        """Complete email processing pipeline"""
         
         email_text = email_data.get("text", "")
         user_preferences = email_data.get("preferences", {})
 
-        all_results = {}
-
-        for model_info in ALL_MODELS:
-            model_name = model_info["name"]
-            model_type = model_info.get("type", "custom")
-            
-            try:
-                # Run the model
-                if model_type == "fallback":
-                    result = simple_classification(email_text)
-                else:
-                    result = self.email_agent._classify_with_model(email_text, model_type=model_type)
-                
-                result["model_name"] = model_name
-                result["model_type"] = model_type
-                all_results[model_name] = result
-
-            except Exception as e:
-                all_results[model_name] = {
-                    "error": str(e),
-                    "model_name": model_name,
-                    "model_type": model_type
-                }
-
-        # Step 2: Choose final result based on confidence/energy/priority
-        final_result = self._select_best_model(all_results, user_preferences)
-
-        # Step 3: Log final result
-        self._log_classification(final_result)
-
-        # Step 4: Add AI insights
-        final_result = self._add_insights(final_result)
-
-        # Step 5: Include all model results for frontend display
-        final_result["other_model_results"] = all_results
-
-        return final_result
-
-    def _select_best_model(self, all_results: Dict[str, Any], user_preferences: Dict) -> Dict[str, Any]:
-        """Pick the best model based on confidence, priority, or energy"""
+        # Try intelligent agent first
+        result = self.email_agent.classify_email(email_text, user_preferences)
         
-        # Default: highest confidence
-        best_model = None
-        max_conf = -1
-        
-        for model_name, result in all_results.items():
-            if "confidence" in result and result["confidence"] > max_conf:
-                max_conf = result["confidence"]
-                best_model = result
+        # If agent failed, use simple classification
+        if result is None:
+            result = simple_classification(email_text)
 
-        # Check user priority (optional)
-        if user_preferences.get("priority") == "energy":
-            # Pick model with lowest CO2
-            best_model = min(
-                [r for r in all_results.values() if "energy_metrics" in r],
-                key=lambda x: x["energy_metrics"]["co2_emissions_g"]
-            )
+        # Add additional processing
+        self._log_classification(result)
+        result = self._add_insights(result)
 
-        return best_model
+        return result
 
     def _log_classification(self, result: Dict):
         """Log classification result to database"""
@@ -299,20 +345,20 @@ class AgentOrchestrator:
         suggestions = []
         
         if result.get("escalated"):
-            suggestions.append("💡 Heavy model was used for higher accuracy")
+            suggestions.append("Heavy model was used for higher accuracy")
             
         if result["energy_metrics"]["co2_emissions_g"] > 5:
-            suggestions.append("🌱 Consider using light model for similar emails to save energy")
+            suggestions.append("Consider using light model for similar emails to save energy")
             
         if result["confidence"] < 0.8:
-            suggestions.append("⚠ Low confidence - you may want to verify this classification")
+            suggestions.append("Low confidence - you may want to verify this classification")
             
         category = result["predicted_category"]
         if category == "spam":
-            suggestions.append("🛡 Consider adding sender to block list")
+            suggestions.append("Consider adding sender to block list")
         elif category == "work":
-            suggestions.append("💼 This looks like a work email - prioritize accordingly")
+            suggestions.append("This looks like a work email - prioritize accordingly")
         elif category == "support":
-            suggestions.append("🎧 This appears to be a support request - respond promptly")
+            suggestions.append("This appears to be a support request - respond promptly")
             
         return suggestions

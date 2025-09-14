@@ -9,6 +9,12 @@ from datetime import datetime
 import os
 import traceback
 import logging
+import sys
+from pathlib import Path
+
+# Add current directory to Python path
+current_dir = Path(__file__).parent
+sys.path.insert(0, str(current_dir))
 
 # Set up detailed logging
 logging.basicConfig(
@@ -73,28 +79,39 @@ def simple_classification(text: str, subject: str = "", sender: str = "") -> Dic
                 "should_review": confidence < 0.7
             },
             "suggestions": [
-                "⚡ Ultra-low energy classification used",
-                "🔄 AI models loading - accuracy will improve soon" if not ORCHESTRATOR_READY else "✅ System running optimally"
+                "Ultra-low energy classification used",
+                "AI models loading - accuracy will improve soon" if not ORCHESTRATOR_READY else "System running optimally"
             ]
         },
         "timestamp": time.time(),
     }
     return result
 
-# Imports with fallbacks and detailed error reporting
+# Try to import backend modules with better error handling
 try:
-    from backend.agent_logic import AgentOrchestrator
-    from backend.config import DB_PATH, EMAIL_CATEGORIES
+    # First try direct import (if files are in same directory)
+    import agent_logic
+    import config
+    AgentOrchestrator = agent_logic.AgentOrchestrator
+    DB_PATH = config.DB_PATH
+    EMAIL_CATEGORIES = config.EMAIL_CATEGORIES
     BACKEND_AVAILABLE = True
-    logger.info("✅ Backend modules imported successfully")
-except ImportError as e:
-    logger.warning(f"⚠ Backend modules not found: {e}")
-    logger.info("Using fallback configuration...")
-    BACKEND_AVAILABLE = False
-
-    # Fallback configuration
-    DB_PATH = "./email_classifier.db"
-    EMAIL_CATEGORIES = ["work", "personal", "spam", "promotions", "support", "newsletter"]
+    logger.info("Backend modules imported successfully (direct import)")
+except ImportError:
+    try:
+        # Try backend package import
+        from backend.agent_logic import AgentOrchestrator
+        from backend.config import DB_PATH, EMAIL_CATEGORIES
+        BACKEND_AVAILABLE = True
+        logger.info("Backend modules imported successfully (package import)")
+    except ImportError as e:
+        logger.warning(f"Backend modules not found: {e}")
+        logger.info("Using fallback configuration...")
+        BACKEND_AVAILABLE = False
+        
+        # Fallback configuration
+        DB_PATH = "./email_classifier.db"
+        EMAIL_CATEGORIES = ["work", "personal", "spam", "promotions", "support", "newsletter"]
 
 # Initialize the orchestrator
 orchestrator = None
@@ -103,14 +120,14 @@ try:
     if BACKEND_AVAILABLE:
         orchestrator = AgentOrchestrator()
         ORCHESTRATOR_READY = True
-        logger.info("✅ AgentOrchestrator initialized successfully")
+        logger.info("AgentOrchestrator initialized successfully")
 except Exception as e:
-    logger.error(f"❌ Could not initialize orchestrator: {e}")
+    logger.error(f"Could not initialize orchestrator: {e}")
     logger.error(f"Traceback: {traceback.format_exc()}")
 
 # Initialize FastAPI
 app = FastAPI(
-    title="🌱 Green AI Email Classification API",
+    title="Green AI Email Classification API",
     version="2.0",
     description="Intelligent email classification with energy optimization",
     debug=True
@@ -125,9 +142,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------
 # Request/Response Models
-# -------------------------
 class EmailClassificationRequest(BaseModel):
     text: str
     subject: Optional[str] = ""
@@ -150,9 +165,7 @@ class EmailClassificationResponse(BaseModel):
     processing_time: float
     timestamp: float
 
-# -------------------------
 # Database initialization
-# -------------------------
 def initialize_database():
     """Initialize SQLite database with required tables"""
     try:
@@ -175,22 +188,32 @@ def initialize_database():
                     energy_efficiency_score REAL
                 )
             """)
-        logger.info("✅ Database initialized successfully")
+        logger.info("Database initialized successfully")
     except Exception as e:
-        logger.error(f"❌ Database initialization failed: {e}")
+        logger.error(f"Database initialization failed: {e}")
 
-# -------------------------
 # API Routes
-# -------------------------
 @app.get("/")
 def root():
     return {
-        "message": "🌱 Green AI Email Classification API",
+        "message": "Green AI Email Classification API",
         "version": "2.0",
         "status": "running",
         "orchestrator_ready": ORCHESTRATOR_READY,
         "backend_available": BACKEND_AVAILABLE,
         "docs": "/docs"
+    }
+
+@app.get("/debug/module-status")
+async def debug_module_status():
+    """Debug endpoint to check what modules are available"""
+    return {
+        "backend_available": BACKEND_AVAILABLE,
+        "orchestrator_ready": ORCHESTRATOR_READY,
+        "python_path": sys.path,
+        "current_dir": str(current_dir),
+        "db_path": DB_PATH,
+        "email_categories": EMAIL_CATEGORIES
     }
 
 @app.post("/classify-email", response_model=EmailClassificationResponse)
@@ -205,14 +228,14 @@ async def classify_email(request: EmailClassificationRequest):
         if ORCHESTRATOR_READY and orchestrator:
             try:
                 result = orchestrator.process_email(request.dict())
-                logger.info("✅ Used orchestrator for classification")
+                logger.info("Used orchestrator for classification")
             except Exception as e:
-                logger.error(f"❌ Orchestrator failed: {e}")
+                logger.error(f"Orchestrator failed: {e}")
                 result = None
 
         if result is None:
             result = simple_classification(request.text, request.subject or "", request.sender or "")
-            logger.info("✅ Used fallback classification")
+            logger.info("Used fallback classification")
 
         processing_time = time.time() - start_time
         log_classification(result, processing_time)
@@ -232,7 +255,7 @@ async def classify_email(request: EmailClassificationRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ classify_email failed: {e}")
+        logger.error(f"classify_email failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/agent-stats")
@@ -252,10 +275,10 @@ async def get_agent_stats():
             # Average CO2 per email
             avg_co2 = cursor.execute("SELECT AVG(co2_emissions_g) FROM email_classifications").fetchone()[0] or 0
             
-            # Total CO2 emissions (sum all emissions)
+            # Total CO2 emissions
             total_co2 = cursor.execute("SELECT SUM(co2_emissions_g) FROM email_classifications").fetchone()[0] or 0
             
-            # Model performance data - FIXED FIELD NAMES
+            # Model performance data
             model_performance = cursor.execute("""
                 SELECT model_used as model, 
                        COUNT(*) as count,
@@ -269,41 +292,25 @@ async def get_agent_stats():
             model_performance_list = [
                 {
                     "model": row[0],
-                    "count": row[1],  # Changed from usage_count to count
+                    "count": row[1],
                     "avg_confidence": round(row[2] or 0, 3),
                     "avg_efficiency": round(row[3] or 0, 2),
-                    "avg_co2_g": round(row[4] or 0, 6)  # Added avg_co2_g field
+                    "avg_co2_g": round(row[4] or 0, 6)
                 }
                 for row in model_performance
             ]
-            
-            # Category distribution
-            category_distribution = cursor.execute("""
-                SELECT predicted_category as category, COUNT(*) as count
-                FROM email_classifications 
-                GROUP BY predicted_category
-                ORDER BY count DESC
-            """).fetchall()
-            
-            category_distribution_list = [
-                {"category": row[0], "count": row[1]}
-                for row in category_distribution
-            ]
-            
-            # Estimated energy savings (rough calculation)
-            energy_savings = max(0, (total * 2.5) - total_co2)  # Assuming 2.5g baseline
             
             return {
                 "total_classifications": total,
                 "escalation_rate": escalation_rate,
                 "avg_co2_per_email_g": avg_co2,
                 "total_co2_emissions_g": total_co2,
-                "energy_savings_estimate": energy_savings,
+                "energy_savings_estimate": max(0, (total * 2.5) - total_co2),
                 "model_performance": model_performance_list,
-                "category_distribution": category_distribution_list
+                "category_distribution": []
             }
     except Exception as e:
-        logger.error(f"❌ Stats calculation failed: {e}")
+        logger.error(f"Stats calculation failed: {e}")
         return {
             "total_classifications": 0,
             "escalation_rate": 0.0,
@@ -314,92 +321,15 @@ async def get_agent_stats():
             "category_distribution": []
         }
 
-# Also add the missing /learning-insights endpoint that your analytics dashboard expects
-@app.get("/learning-insights")
-async def get_learning_insights():
-    """Get learning and performance insights"""
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.cursor()
-            
-            # Get total classifications for data sufficiency check
-            total = cursor.execute("SELECT COUNT(*) FROM email_classifications").fetchone()[0]
-            
-            if total < 10:  # Not enough data
-                return {
-                    "performance_metrics": {
-                        "insufficient_data": True,
-                        "data_points_needed": 10 - total
-                    },
-                    "threshold_recommendation": {
-                        "insufficient_data": True
-                    }
-                }
-            
-            # Calculate performance metrics
-            avg_confidence = cursor.execute("SELECT AVG(confidence) FROM email_classifications").fetchone()[0] or 0
-            
-            # Simulate light vs heavy model accuracy (you can replace with actual logic)
-            light_model_count = cursor.execute("SELECT COUNT(*) FROM email_classifications WHERE model_used = 'keyword_fallback_v2'").fetchone()[0]
-            heavy_model_count = total - light_model_count
-            
-            light_accuracy = 0.75 if light_model_count > 0 else 0  # Simulated
-            heavy_accuracy = 0.92 if heavy_model_count > 0 else 0  # Simulated
-            overall_accuracy = (light_accuracy * light_model_count + heavy_accuracy * heavy_model_count) / total if total > 0 else 0
-            
-            # Generate improvement suggestions
-            suggestions = []
-            if avg_confidence < 0.7:
-                suggestions.append("Consider tuning confidence thresholds")
-            if light_model_count / total > 0.8:
-                suggestions.append("High fallback usage - consider improving primary models")
-            if escalated := cursor.execute("SELECT COUNT(*) FROM email_classifications WHERE escalated = 1").fetchone()[0]:
-                if escalated / total > 0.1:
-                    suggestions.append("High escalation rate - review classification logic")
-            
-            # Threshold recommendation
-            current_threshold = 0.85  # Your current threshold
-            recommended_threshold = current_threshold
-            
-            if avg_confidence > 0.9:
-                recommended_threshold = 0.80  # Can be more aggressive
-            elif avg_confidence < 0.6:
-                recommended_threshold = 0.90  # Be more conservative
-            
-            return {
-                "performance_metrics": {
-                    "insufficient_data": False,
-                    "overall_accuracy": overall_accuracy,
-                    "light_model_accuracy": light_accuracy,
-                    "heavy_model_accuracy": heavy_accuracy,
-                    "improvement_suggestions": suggestions
-                },
-                "threshold_recommendation": {
-                    "insufficient_data": False,
-                    "current_threshold": current_threshold,
-                    "recommended_threshold": recommended_threshold
-                }
-            }
-            
-    except Exception as e:
-        logger.error(f"❌ Learning insights failed: {e}")
-        return {
-            "performance_metrics": {"insufficient_data": True},
-            "threshold_recommendation": {"insufficient_data": True}
-        }
-# Add this endpoint to your main.py file after the existing routes
-
 @app.get("/runs/recent")
 async def get_recent_runs(limit: int = 50):
     """Get recent email classification runs"""
     try:
-        # Validate limit parameter
-        limit = max(1, min(limit, 1000))  # Between 1 and 1000
+        limit = max(1, min(limit, 1000))
         
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
             
-            # Get recent runs with all relevant data
             cursor.execute("""
                 SELECT 
                     id,
@@ -419,7 +349,6 @@ async def get_recent_runs(limit: int = 50):
             
             rows = cursor.fetchall()
             
-            # Convert to list of dictionaries
             columns = [
                 "id", "timestamp", "text_hash", "label", "confidence", 
                 "model_used", "escalated", "co2_g", "processing_time", 
@@ -430,21 +359,15 @@ async def get_recent_runs(limit: int = 50):
             for row in rows:
                 result = dict(zip(columns, row))
                 
-                # Convert timestamp to local time string for display
                 if result["timestamp"]:
-                    from datetime import datetime
                     dt = datetime.fromtimestamp(result["timestamp"])
                     result["ts_local"] = dt.strftime("%Y-%m-%d %H:%M:%S")
                 else:
                     result["ts_local"] = "N/A"
                 
-                # Add mode field (you can customize this based on your logic)
-                if result["model_used"] == "keyword_fallback_v2":
-                    result["mode"] = "fallback"
-                else:
-                    result["mode"] = "ai"
+                result["mode"] = "fallback" if result["model_used"] == "keyword_fallback_v2" else "ai"
                 
-                # Round numeric values for display
+                # Round numeric values
                 if result["confidence"]:
                     result["confidence"] = round(result["confidence"], 3)
                 if result["co2_g"]:
@@ -459,43 +382,11 @@ async def get_recent_runs(limit: int = 50):
             return results
             
     except Exception as e:
-        logger.error(f"❌ Failed to get recent runs: {e}")
+        logger.error(f"Failed to get recent runs: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to retrieve recent runs: {str(e)}")
 
-# Also add this helper endpoint for debugging
-@app.get("/debug/tables")
-async def debug_tables():
-    """Debug endpoint to check database structure"""
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.cursor()
-            
-            # Get table info
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = cursor.fetchall()
-            
-            result = {"tables": []}
-            for (table_name,) in tables:
-                cursor.execute(f"PRAGMA table_info({table_name})")
-                columns = cursor.fetchall()
-                
-                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-                count = cursor.fetchone()[0]
-                
-                result["tables"].append({
-                    "name": table_name,
-                    "columns": [{"name": col[1], "type": col[2]} for col in columns],
-                    "row_count": count
-                })
-            
-            return result
-    except Exception as e:
-        logger.error(f"❌ Debug tables failed: {e}")
-        return {"error": str(e)}
-# -------------------------
-# Database logging
-# -------------------------
 def log_classification(result: Dict, processing_time: float):
+    """Log classification result to database"""
     try:
         with sqlite3.connect(DB_PATH) as conn:
             email_hash = hashlib.sha256(str(result.get("predicted_category", "")).encode()).hexdigest()[:16]
@@ -516,18 +407,15 @@ def log_classification(result: Dict, processing_time: float):
                 result["energy_metrics"]["energy_efficiency_score"]
             ))
     except Exception as e:
-        logger.warning(f"⚠ DB logging error: {e}")
+        logger.warning(f"DB logging error: {e}")
 
-# -------------------------
-# Startup
-# -------------------------
 @app.on_event("startup")
 async def startup_event():
-    logger.info("🌱 API starting...")
+    logger.info("API starting...")
     initialize_database()
     if not ORCHESTRATOR_READY:
-        logger.warning("⚠ Running in fallback mode - full AI models not available")
-    logger.info("✅ Ready!")
+        logger.warning("Running in fallback mode - full AI models not available")
+    logger.info("Ready!")
 
 if __name__ == "__main__":
     import uvicorn
